@@ -2,9 +2,9 @@ import requests
 from datetime import datetime, timezone
 import pytz
 
-TOKEN_TELEGRAM = "8497400053:AAFPwYoPz-zJHPKId6SVj5Oty7DkYyvs5GA"
-CHAT_ID = "-1002969130542"
-API_KEY = "0ced498a2f6cdd84fe769ff76c69836e"
+TOKEN_TELEGRAM = ""
+CHAT_ID = ""
+API_KEY = ""
 
 HEADERS = {
     "x-apisports-key": API_KEY,
