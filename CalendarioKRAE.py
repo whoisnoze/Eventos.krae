@@ -1,181 +1,82 @@
-import requests
-from datetime import datetime, timezone
-import pytz
+import asyncio
+from playwright.async_api import async_playwright
+from telegram import Bot
+from telegram.constants import ParseMode
 
-TOKEN_TELEGRAM = ""
-CHAT_ID = ""
-API_KEY = ""
+# --- CONFIGURACIÓN ---
+TOKEN = ''
+CHAT_ID = ''
+URL = ""
 
-HEADERS = {
-    "x-apisports-key": API_KEY,
-    "Accept": "application/json"
-}
-
-# Diccionario
-LIGAS_IMPORTANTES = {
-    "La Liga": 140,
-    "Segunda División": 141,
-    "Copa del Rey": 143,
-    "Supercopa de España": 556,
-    
-    "Champions League": 2,
-    "Europa League": 3,
-
-    "Premier League": 39,
-    "Championship": 40,
-    "FA Cup": 45,
-    "EFL Cup": 48,
-
-    "Bundesliga": 78,
-    "2. Bundesliga": 79,
-    "DFB-Pokal": 82,
-
-    "Serie A": 135,
-    "Serie B": 136,
-    "Coppa Italia": 137,
-
-    "Ligue 1": 61,
-    "Ligue 2": 62,
-    "Coupe de France": 66
-}
-
-LIGAS_BALONCESTO = {
-    "ACB": 117,
-    "NBA": 12
-}
-
-# Fecha
-hoy = datetime.now().strftime("%Y-%m-%d")
-madrid = pytz.timezone("Europe/Madrid")
-
-# Eventos de futbol
-def obtener_eventos_futbol():
-    mensaje = "⚽ *Eventos de fútbol*\n\n"
-
-    try:
-        url = f"https://v3.football.api-sports.io/fixtures?date={hoy}"
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        data = r.json()
-    except Exception as e:
-        print(f"Error al consultar la API: {e}")
-        return "No se pudo consultar la API"
-
-    eventos = data.get("response", [])
-    if not eventos:
-        return "No hay partidos hoy."
-
-    for evento in eventos:
-        fixture = evento.get("fixture")
-        teams = evento.get("teams")
-        league = evento.get("league")
-        if not fixture or not teams or not league:
-            continue
-
-        # Filtrar solo por ligas asignadas
-        if league.get("id") not in LIGAS_IMPORTANTES.values():
-            continue
-
-        # Convertir hora UTC a Madrid
-        fecha_utc = datetime.fromisoformat(fixture["date"].replace("Z","+00:00"))
-        hora_local = fecha_utc.astimezone(madrid).strftime("%H:%M")
-
-        mensaje += f"{hora_local} | {league['name']}\n"
-        mensaje += f"🆚 {teams['home']['name']} vs {teams['away']['name']}\n\n"
-
-    return mensaje
-
-# Eventos de Baloncesto
-def obtener_eventos_balon():
-    mensaje = "🏀 *Eventos de baloncesto hoy*\n\n"
-
-    for liga_nombre, liga_id in LIGAS_BALONCESTO.items():
-        params = {
-            "league": liga_id,
-            "season": 2026,
-            "date": hoy
-        }
-
+async def extraer_agenda():
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = await context.new_page()
+        
         try:
-            url = "https://v1.basketball.api-sports.io/fixtures"
-            r = requests.get(url, headers=HEADERS, params=params, timeout=10)
-            data = r.json()
+            print("🌐 Accediendo a Marca...")
+            await page.goto(URL, wait_until="networkidle")
+            
+            try:
+                await page.wait_for_selector("#didomi-notice-agree-button", timeout=3000)
+                await page.click("#didomi-notice-agree-button")
+            except:
+                pass
+
+            await page.wait_for_timeout(2000)
+            
+            # Buscamos los eventos
+            eventos_raw = await page.query_selector_all("li[class*='event'], div[class*='event']")
+            
+            lista_final = []
+            for ev in eventos_raw:
+                texto = await ev.inner_text()
+                # Limpiamos y eliminamos líneas vacías
+                lineas = [l.strip() for l in texto.split('\n') if l.strip()]
+                
+                # Basado en tu última salida, el formato es:
+                # [DEPORTE, HORA, TITULO, SUBTITULO (opcional), CANAL]
+                if len(lineas) >= 4:
+                    deporte = lineas[0].upper()
+                    hora = lineas[1]
+                    evento = lineas[2]
+                    detalle = lineas[3]
+                    # El canal suele ser el último elemento
+                    canal = lineas[-1]
+
+                    # Emoji personalizado
+                    emoji = "⚽" if "FÚTBOL" in deporte else "🏀" if "BALONCESTO" in deporte or "ENDESA" in deporte else "🎾" if "TENIS" in deporte or "ATP" in deporte else "🏎️" if "FÓRMULA" in deporte or "F1" in deporte else "🚴" if "CICLISMO" in deporte or "TOUR" in deporte else "🏆"
+                    
+                    # Construimos el mensaje con un diseño limpio
+                    # Ejemplo: ⚽ 21:00 | Brujas - Atlético de Madrid
+                    #          📺 Movistar Plus+ (CHAMPIONS LEAGUE)
+                    linea = f"{emoji} *{hora}* | *{evento}*\n└ {detalle}\n📺 _{canal}_"
+                    lista_final.append(linea)
+            
+            await browser.close()
+            return "\n\n".join(lista_final[:25]) # Mandamos los 25 primeros
+            
         except Exception as e:
-            print(f"Error consultando {liga_nombre}: {e}")
-            continue
+            await browser.close()
+            return f"❌ Error en la extracción: {e}"
 
-        eventos = data.get("response", [])
-        if not eventos:
-            continue
+async def enviar_telegram():
+    print("🤖 Generando agenda para Telegram...")
+    texto_agenda = await extraer_agenda()
+    
+    header = "📅 *AGENDA DEPORTIVA HOY* 📅\n"
+    header += "" + "—"*15 + "\n\n"
+    
+    bot = Bot(token=TOKEN)
+    await bot.send_message(
+        chat_id=CHAT_ID, 
+        text=header + texto_agenda, 
+        parse_mode=ParseMode.MARKDOWN
+    )
+    print("✅ Mensaje enviado!")
 
-        for evento in eventos:
-            fixture = evento.get("fixture")
-            teams = evento.get("teams")
-            if not fixture or not teams:
-                continue
-
-            # Convertir hora UTC a Madrid
-            fecha_utc = datetime.fromisoformat(fixture["date"].replace("Z","+00:00"))
-            hora_local = fecha_utc.astimezone(madrid).strftime("%H:%M")
-
-            mensaje += f"{hora_local} | {liga_nombre}\n"
-            mensaje += f"🆚 {teams['home']['name']} vs {teams['away']['name']}\n\n"
-
-    return mensaje
-
-# Eventos F1
-def obtener_eventos_f1():
-    mensaje = "🏎️ *Eventos de Formula 1*\n\n"
-
-    try:
-        url = "https://v1.formula-1.api-sports.io/races"
-        params = {
-            "season": 2026,
-            "date": hoy,
-            "timezone": "Europe/Madrid"
-        }
-        r = requests.get(url, headers=HEADERS, params=params, timeout=10)
-        data = r.json()
-    except Exception as e:
-        print(f"Error consultando F1: {e}")
-        return "No se pudo consultar la API de F1"
-
-    eventos = data.get("response", [])
-    if not eventos:
-        return "🏎️ No hay carreras de F1 hoy."
-
-    for carrera in eventos:
-        race = carrera.get("race")
-        circuit = carrera.get("circuit")
-        if not race or not circuit:
-            continue
-
-        # Hora de inicio ya viene en la API con timezone
-        hora = race.get("date")
-
-        mensaje += f"{hora} | {race['name']}\n"
-        mensaje += f"📍 {circuit['name']}, {circuit['location']['city']}, {circuit['location']['country']}\n\n"
-
-
-# MEnsaje de Telegram
-def enviar_telegram(mensaje):
-    url = f"https://api.telegram.org/bot{TOKEN_TELEGRAM}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": mensaje,
-        "parse_mode": "Markdown"
-    }
-    try:
-        r = requests.post(url, data=payload)
-        if r.status_code != 200:
-            print(f"Error enviando mensaje: {r.text}")
-    except Exception as e:
-        print(f"Excepción al enviar mensaje: {e}")
-
-# ---------- MAIN ----------
 if __name__ == "__main__":
-    msg_futbol = obtener_eventos_futbol()
-    msg_balon = obtener_eventos_balon()
-    msg_f1 = obtener_eventos_f1()
-    msg_completo = "📅 *Calendario de hoy*\n\n" + msg_futbol + "\n" + msg_balon + "\n" + msg_f1
-    enviar_telegram(msg_completo)
-    print("Mensaje enviado a Telegram.")
+    asyncio.run(enviar_telegram())
